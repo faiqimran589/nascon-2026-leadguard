@@ -184,6 +184,7 @@ function overlaps(busy, start, end) {
 }
 
 r.get('/appointments', async (req, res) => {
+  if (!can(req.user, 'crm.view')) throw new HttpError(403, 'You do not have permission to view appointments.');
   const params = [req.ws];
   const where = ['a.workspace_id = $1'];
   if (!can(req.user, 'crm.view_all')) { params.push(req.user.id); where.push(`(a.user_id = $${params.length} OR c.owner_id = $${params.length})`); }
@@ -283,6 +284,7 @@ r.post('/appointments/:id/cancel', requirePerm('crm.edit'), async (req, res) => 
   await tx(async (db) => {
     await db.query("UPDATE appointments SET status = 'cancelled', version = version + 1, updated_at = now() WHERE id = $1", [a.id]);
     await addActivity(db, { workspaceId: req.ws, contactId: a.contact_id, opportunityId: a.opportunity_id, type: 'appointment', actorId: req.user.id, body: `Appointment cancelled: ${a.title}`, data: { appointment_id: a.id } });
+    await audit(db, { workspaceId: req.ws, actor: req.user, action: 'appointment.cancelled', targetType: 'appointment', targetId: a.id, targetLabel: a.title, before: { status: a.status, start_at: a.start_at } , after: { status: 'cancelled' } });
     emit(db, req.ws, 'appointments', {}); emit(db, req.ws, 'dashboard', {});
   });
   res.json({ ok: true });

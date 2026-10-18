@@ -431,3 +431,11 @@ CREATE TRIGGER audit_log_append_only BEFORE UPDATE OR DELETE ON audit_log
 DROP TRIGGER IF EXISTS integration_events_append_only ON integration_events;
 CREATE TRIGGER integration_events_append_only BEFORE UPDATE OR DELETE ON integration_events
   FOR EACH ROW EXECUTE FUNCTION forbid_history_change();
+
+-- TRUNCATE bypasses row triggers, so block it with statement-level triggers too.
+DROP TRIGGER IF EXISTS audit_log_no_truncate ON audit_log;
+CREATE TRIGGER audit_log_no_truncate BEFORE TRUNCATE ON audit_log
+  FOR EACH STATEMENT EXECUTE FUNCTION forbid_history_change();
+DROP TRIGGER IF EXISTS integration_events_no_truncate ON integration_events;
+CREATE TRIGGER integration_events_no_truncate BEFORE TRUNCATE ON integration_events
+  FOR EACH STATEMENT EXECUTE FUNCTION forbid_history_change();

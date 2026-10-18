@@ -42,7 +42,7 @@ r.get('/users', async (req, res) => {
   })));
 });
 
-r.post('/users/invite', requirePerm('users.manage'), async (req, res) => {
+r.post('/users/invite', requirePerm('users.manage'), requireLevel('owner', 'admin'), async (req, res) => {
   const b = parse(z.object({
     email: z.string().trim().email().max(200), name: z.string().trim().min(1).max(80),
     level: z.enum(['admin', 'user']), roleId: z.string().uuid(),
@@ -64,12 +64,16 @@ r.post('/users/invite', requirePerm('users.manage'), async (req, res) => {
   res.status(201).json({ user: u, inviteUrl: `${config.appUrl}/invite/${token}` });
 });
 
-r.post('/users/:id/reinvite', requirePerm('users.manage'), async (req, res) => {
+r.post('/users/:id/reinvite', requirePerm('users.manage'), requireLevel('owner', 'admin'), async (req, res) => {
+  const t = await one('SELECT id, email, level, password_hash IS NULL AS pending FROM users WHERE id = $1 AND workspace_id = $2', [req.params.id, req.ws]);
+  if (!t) throw notFound('User');
+  if (!t.pending) throw new HttpError(409, 'This user has already joined.');
+  if (t.level !== 'user' && req.user.level !== 'owner') throw new HttpError(403, 'Only the Owner can re-send an Admin invitation.');
   const token = randomToken(24);
-  const u = await one(
-    `UPDATE users SET invite_token_hash = $3, invite_expires_at = now() + interval '7 days'
-      WHERE id = $1 AND workspace_id = $2 AND password_hash IS NULL RETURNING id`, [req.params.id, req.ws, sha256(token)]);
-  if (!u) throw new HttpError(409, 'This user has already joined.');
+  await tx(async (db) => {
+    await db.query(`UPDATE users SET invite_token_hash = $2, invite_expires_at = now() + interval '7 days' WHERE id = $1`, [t.id, sha256(token)]);
+    await audit(db, { workspaceId: req.ws, actor: req.user, action: 'user.reinvited', targetType: 'user', targetId: t.id, targetLabel: t.email, after: { level: t.level } });
+  });
   res.json({ inviteUrl: `${config.appUrl}/invite/${token}` });
 });
 

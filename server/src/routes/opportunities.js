@@ -77,8 +77,9 @@ r.post('/opportunities', requirePerm('crm.create'), async (req, res) => {
     const draft = { value: b.value ?? null, close_date: b.closeDate ?? null, custom };
     const missing = missingRequired(stage, draft, fields);
     if (missing.length) throw new HttpError(422, `The stage "${stage.name}" requires: ${missing.map((m) => m.label).join(', ')}.`, { missing });
+    if (b.ownerId && b.ownerId !== req.user.id && !can(req.user, 'leads.reassign')) throw new HttpError(403, 'Only users who can reassign may create opportunities owned by someone else.');
     const ownerId = b.ownerId || c.owner_id || req.user.id;
-    if (!(await db.query('SELECT 1 FROM users WHERE id = $1 AND workspace_id = $2', [ownerId, req.ws])).rows.length) throw notFound('Owner');
+    if (!(await db.query('SELECT 1 FROM users WHERE id = $1 AND workspace_id = $2 AND active', [ownerId, req.ws])).rows.length) throw notFound('Owner');
     const ws = await db.query('SELECT default_currency FROM workspaces WHERE id = $1', [req.ws]);
     const { rows: [o] } = await db.query(
       `INSERT INTO opportunities (workspace_id, pipeline_id, stage_id, contact_id, title, value, currency, owner_id, close_date, tags, custom)
@@ -152,6 +153,7 @@ r.patch('/opportunities/:id', requirePerm('crm.edit'), async (req, res) => {
       [old.id, req.ws, next.title, next.value, next.currency, next.owner_id, next.close_date, next.tags, next.custom, next.stage_id, b.version]);
     if (!x) throw new HttpError(409, 'Someone else changed this opportunity while you were editing. Reload to see the latest version, then re-apply your change.');
     const d = diff(old, x, ['title', 'currency', 'owner_id', 'close_date', 'tags', 'custom']);
+    if (d?.after.owner_id !== undefined) await audit(db, { workspaceId: req.ws, actor: req.user, action: 'opportunity.reassigned', targetType: 'opportunity', targetId: x.id, targetLabel: x.title, before: { owner_id: old.owner_id }, after: { owner_id: x.owner_id } });
     if (d) await addActivity(db, { workspaceId: req.ws, contactId: x.contact_id, opportunityId: x.id, type: 'field_edit', actorId: req.user.id, body: `Edited ${Object.keys(d.after).join(', ').replace(/_/g, ' ')}`, data: d });
     if (Number(old.value ?? -1) !== Number(x.value ?? -1)) {
       await addActivity(db, { workspaceId: req.ws, contactId: x.contact_id, opportunityId: x.id, type: 'field_edit', actorId: req.user.id, body: `Value changed from ${old.value ?? '—'} to ${x.value ?? '—'} ${x.currency.toUpperCase()}`, data: { sensitive: 'value' } });

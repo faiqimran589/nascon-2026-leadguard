@@ -73,11 +73,13 @@ async function ownerOf(db, workspaceId) {
 
 const reachable = (u) => u && u.active && !['on_leave', 'offline'].includes(u.availability);
 
-// Fallback when nobody is Available: backup -> manager -> owner (a lead is never left without an owner).
+// Fallback when no employee is Available below the limit: an Available backup -> an Available manager
+// (both over their limit) -> the Owner, who is always accountable (a lead is never left without an owner).
 async function fallbackTarget(db, workspaceId, rules, excludeIds) {
   for (const [id, label] of [[rules.backup_user_id, 'backup'], [rules.manager_user_id, 'manager']]) {
     const u = await userById(db, workspaceId, id);
-    if (reachable(u) && !excludeIds.includes(u.id)) return { user: u, label };
+    // F3.3: a Busy / On leave / Offline employee never receives a new lead, even as the fallback.
+    if (u && u.active && u.availability === 'available' && !excludeIds.includes(u.id)) return { user: u, label };
   }
   return { user: await ownerOf(db, workspaceId), label: 'owner' };
 }

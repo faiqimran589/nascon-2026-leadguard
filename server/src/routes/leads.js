@@ -211,6 +211,9 @@ r.get('/audit', requirePerm('audit.view'), async (req, res) => {
   if (req.query.action) add(`${String(req.query.action)}%`, 'a.action LIKE ?');
   if (req.query.userId === 'system') where.push('a.actor_user_id IS NULL');
   else if (req.query.userId) add(String(req.query.userId), 'a.actor_user_id = ?');
+  const isDate = (v) => /^\d{4}-\d{2}-\d{2}$/.test(String(v)) && !Number.isNaN(Date.parse(String(v)));
+  for (const k of ['from', 'to']) if (req.query[k] && !isDate(req.query[k])) throw new HttpError(400, `"${k}" must be a date (YYYY-MM-DD).`);
+  if (req.query.userId && req.query.userId !== 'system' && !/^[0-9a-f-]{36}$/i.test(String(req.query.userId))) throw new HttpError(400, 'Unknown user filter.');
   if (req.query.from) add(String(req.query.from), 'a.created_at >= ?::date');
   if (req.query.to) add(String(req.query.to), "a.created_at < (?::date + interval '1 day')");
   if (req.query.targetId) add(String(req.query.targetId), 'a.target_id = ?');
@@ -220,7 +223,10 @@ r.get('/audit', requirePerm('audit.view'), async (req, res) => {
     one(`SELECT count(*) AS n FROM audit_log a WHERE ${where.join(' AND ')}`, params),
     query('SELECT DISTINCT split_part(action, \'.\', 1) AS g FROM audit_log WHERE workspace_id = $1 ORDER BY 1', [req.ws]),
   ]);
-  res.json({ items: rows, total: count.n, page, pageSize, groups: actions.rows.map((x) => x.g) });
+  // F1.4: opportunity values stay hidden in the history for users who may not see values.
+  const strip = (o) => (o && typeof o === 'object' && 'value' in o ? (({ value, ...rest }) => ({ ...rest, value: '•••' }))(o) : o);
+  const items = can(req.user, 'values.view') ? rows : rows.map((a) => ({ ...a, before: strip(a.before), after: strip(a.after) }));
+  res.json({ items, total: count.n, page, pageSize, groups: actions.rows.map((x) => x.g) });
 });
 
 // Payments list (drill-down for "payments received this month")

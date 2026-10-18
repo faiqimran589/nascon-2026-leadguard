@@ -11,7 +11,7 @@
     "start": "node server/src/index.js",
     "seed": "node server/src/db/seed.js",
     "migrate": "node server/src/db/migrate.js",
-    "test": "node server/test/smoke.js"
+    "test": "node server/test/smoke.js && node server/test/acceptance.js"
   },
   "dependencies": {
     "@vitejs/plugin-react": "^4.3.4",

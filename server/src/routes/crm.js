@@ -72,6 +72,7 @@ r.post('/contacts', requirePerm('crm.create'), async (req, res) => {
   const b = parse(contactBody, req.body);
   const c = await tx(async (db) => {
     await checkRefs(db, req.ws, b);
+    if (b.ownerId && b.ownerId !== req.user.id && !can(req.user, 'leads.reassign')) throw new HttpError(403, 'Only users who can reassign leads may create records owned by someone else.');
     const custom = validateCustom(b.custom, await loadFields(db, req.ws, 'contact'));
     const { rows: [x] } = await db.query(
       `INSERT INTO contacts (workspace_id, first_name, last_name, email, phone, company_id, owner_id, tags, custom, source)
@@ -149,6 +150,7 @@ r.patch('/contacts/:id', requirePerm('crm.edit'), async (req, res) => {
     const d = diff(old, x, ['first_name', 'last_name', 'email', 'phone', 'company_id', 'owner_id', 'tags', 'custom', 'opted_out']);
     if (d) {
       await addActivity(db, { workspaceId: req.ws, contactId: x.id, type: 'field_edit', actorId: req.user.id, body: `Edited ${Object.keys(d.after).join(', ').replace(/_/g, ' ')}`, data: d });
+      if (d.after.owner_id !== undefined) await audit(db, { workspaceId: req.ws, actor: req.user, action: 'contact.reassigned', targetType: 'contact', targetId: x.id, targetLabel: `${x.first_name} ${x.last_name}`, before: { owner_id: old.owner_id }, after: { owner_id: x.owner_id } });
       if (d.after.opted_out !== undefined) await audit(db, { workspaceId: req.ws, actor: req.user, action: x.opted_out ? 'contact.opted_out' : 'contact.opted_in', targetType: 'contact', targetId: x.id, targetLabel: `${x.first_name} ${x.last_name}` });
       await recordLeadAction(db, { workspaceId: req.ws, user: req.user, contactId: x.id, via: 'edited the contact' });
     }
@@ -262,7 +264,10 @@ r.post('/lists', async (req, res) => {
   res.status(201).json(row);
 });
 r.delete('/lists/:id', async (req, res) => {
-  await query('DELETE FROM saved_lists WHERE id = $1 AND workspace_id = $2 AND user_id = $3', [req.params.id, req.ws, req.user.id]);
+  await tx(async (db) => {
+    const { rows: [l] } = await db.query('DELETE FROM saved_lists WHERE id = $1 AND workspace_id = $2 AND user_id = $3 RETURNING *', [req.params.id, req.ws, req.user.id]);
+    if (l) await audit(db, { workspaceId: req.ws, actor: req.user, action: 'list.deleted', targetType: 'saved_list', targetId: l.id, targetLabel: l.name, before: { entity: l.entity, filters: l.filters } });
+  });
   res.json({ ok: true });
 });
 

@@ -91,7 +91,7 @@ You need **Node.js 20 or newer** (`node -v` should print v20 or higher) and a fr
    ```powershell
    npm test
    ```
-   It runs 65 end-to-end checks and should end with `65 passed, 0 failed`. It creates two throw-away workspaces.
+   It runs 99 end-to-end checks in two parts and should end with `75 passed, 0 failed` and then `24 passed, 0 failed`. It creates throw-away test workspaces in whichever database `.env` points to, so run it against a test database, not the one you demo from.
 
 > Webhooks (Twilio and Stripe) need a public HTTPS address, which your laptop does not have. Test those on the deployed Render URL (section 3). If you really want to test them locally, use a tunnel such as `cloudflared tunnel --url http://localhost:3000` and set `APP_URL` in `.env` to the tunnel URL.
 
