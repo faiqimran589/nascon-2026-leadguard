@@ -20,6 +20,9 @@ async function main() {
   await migrate();
   const exists = await pool.query('SELECT 1 FROM users WHERE lower(email) = lower($1)', [OWNER_EMAIL]);
   if (exists.rows.length) {
+    const { rows: [w] } = await pool.query('SELECT u.workspace_id FROM users u WHERE lower(u.email) = lower($1)', [OWNER_EMAIL]);
+    const added = await tx((db) => addHistory(db, w.workspace_id));
+    console.log(added ? `Added ${added} historical leads (last 3 weeks) so the dashboard charts have data.` : 'History already present.');
     console.log(`Demo workspace already exists. Log in as ${OWNER_EMAIL} / ${PASSWORD}`);
     return;
   }
@@ -113,6 +116,7 @@ async function main() {
         await acknowledge(db, { workspaceId: W, leadId: lead.id, user: u, via: 'seed' });
       }
     }
+    await addHistory(db, W);
     console.log('\nDemo workspace created: Sunrise Solar (Demo)');
     console.log(`  Owner   : ${OWNER_EMAIL}`);
     console.log('  Admin   : admin@sunrise.demo');
@@ -122,6 +126,54 @@ async function main() {
     console.log('  Backup  : backup@sunrise.demo');
     console.log(`  Password for all: ${PASSWORD}\n`);
   });
+}
+
+// Three weeks of past lead activity (through the real assignment engine, then dated back) so the
+// dashboard trend charts are meaningful in a demo. Runs once per workspace. No fake payments/messages.
+async function addHistory(db, W) {
+  const { rows: [{ n }] } = await db.query("SELECT count(*)::int AS n FROM leads WHERE workspace_id = $1 AND title LIKE '%(history)'", [W]);
+  if (n > 0) return 0;
+  const { rows: [owner] } = await db.query("SELECT * FROM users WHERE workspace_id = $1 AND level = 'owner'", [W]);
+  const sources = ['web_form', 'web_form', 'manual', 'web_form', 'whatsapp', 'manual', 'web_form'];
+  const FN = ['Adeel', 'Bushra', 'Waqas', 'Sadia', 'Nabeel', 'Komal', 'Faisal', 'Areeba', 'Shoaib', 'Mahnoor', 'Imtiaz', 'Rida'];
+  const LN = ['Javed', 'Rauf', 'Anwar', 'Saleem', 'Aslam', 'Farooq', 'Nadeem', 'Zafar'];
+  let made = 0;
+  for (let i = 0; i < 48; i++) {
+    const daysAgo = 21 - Math.floor(i / 2.3);           // roughly 2 per day, growing towards today
+    if (daysAgo < 1) break;
+    const hour = 9 + ((i * 5) % 9);
+    const ts = new Date(Date.now() - daysAgo * 86400_000);
+    ts.setUTCHours(hour - 5, (i * 13) % 60, 0, 0);      // office hours in Pakistan (UTC+5)
+    const fn = FN[i % FN.length]; const ln = LN[(i * 3) % LN.length];
+    const src = sources[i % sources.length];
+    const lead = await createLead(db, {
+      workspaceId: W, source: src, title: `${fn} ${ln} (history)`, message: 'Enquiry about a rooftop solar system',
+      contact: { firstName: fn, lastName: ln, email: `${fn}.${ln}.h${i}@example.pk`.toLowerCase(), phone: `+92345${String(2000000 + i * 911).slice(0, 7)}` },
+      actor: src === 'manual' ? owner : null,
+    });
+    // Response time improves over the period: ~12 min three weeks ago -> ~1-2 min recently
+    const respSec = Math.max(25, Math.round((daysAgo / 21) * 600 + ((i * 37) % 90)));
+    const escalated = i % 5 === 1;
+    const status = i % 4 === 0 ? 'closed' : 'converted';
+    await db.query(
+      `UPDATE leads SET created_at = $2::timestamptz, assigned_at = $2::timestamptz, first_assigned_at = $2::timestamptz, last_action_at = $2::timestamptz + make_interval(secs => $3),
+              first_acknowledged_at = $2::timestamptz + make_interval(secs => $3), first_acknowledged_by = owner_id, acknowledged_at = $2::timestamptz + make_interval(secs => $3),
+              ack_deadline = NULL, status = $4, escalation_count = $5, escalation_level = $5 WHERE id = $1`,
+      [lead.id, ts, respSec + (escalated ? 120 : 0), status, escalated ? 1 : 0]);
+    await db.query('UPDATE lead_assignments SET created_at = $2 WHERE lead_id = $1', [lead.id, ts]);
+    await db.query('UPDATE activities SET created_at = $2 WHERE lead_id = $1', [lead.id, ts]);
+    await db.query('UPDATE contacts SET created_at = $2 WHERE id = $1', [lead.contact_id, ts]);
+    if (escalated) {
+      await db.query(
+        `INSERT INTO lead_assignments (workspace_id, lead_id, from_user_id, to_user_id, kind, level, reason, created_at)
+         SELECT $1, $2, owner_id, owner_id, 'escalation', 1, 'Not acknowledged within the window (history)', $3 FROM leads WHERE id = $2`,
+        [W, lead.id, new Date(ts.getTime() + 120_000)]);
+    }
+    made++;
+  }
+  // Notifications generated while building history are not useful to anyone.
+  await db.query("DELETE FROM notifications WHERE workspace_id = $1 AND title LIKE '%(history)%'", [W]);
+  return made;
 }
 
 main().then(() => pool.end()).catch((e) => { console.error(e); process.exit(1); });

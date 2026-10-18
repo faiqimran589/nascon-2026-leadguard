@@ -95,3 +95,46 @@ export async function dashboard(user, { scope, tz }) {
     projectedUnpaid: projected.rows.map((r) => ({ currency: r.currency, cents: Number(r.cents) })),
   };
 }
+
+// Daily trends for the dashboard charts. Days are calendar days in the viewer's time zone and
+// every series uses the same definitions as the headline figures above.
+export async function trends(user, { scope, tz, days = 14 }) {
+  const ws = user.workspace_id;
+  const personal = scope === 'personal';
+  const n = Math.min(Math.max(days, 7), 90);
+  const me = user.id;
+  const { rows: [wsRow] } = await query('SELECT default_currency FROM workspaces WHERE id = $1', [ws]);
+  const cur = wsRow.default_currency;
+  // $1 ws, $2 tz, $3 days, $4 me (only referenced in personal mode)
+  const base = personal ? [ws, tz, n, me] : [ws, tz, n];
+  const daysCte = `WITH days AS (
+      SELECT generate_series((now() AT TIME ZONE $2)::date - ($3::int - 1), (now() AT TIME ZONE $2)::date, interval '1 day')::date AS day)`;
+  const since = `now() - make_interval(days => $3::int + 1)`;
+  const [leads, esc, resp, rev, sources] = await Promise.all([
+    query(`${daysCte} SELECT d.day, COALESCE(x.n, 0) AS v FROM days d LEFT JOIN (
+             SELECT (created_at AT TIME ZONE $2)::date AS day, count(*) AS n FROM leads
+              WHERE workspace_id = $1 AND created_at >= ${since} ${personal ? 'AND owner_id = $4' : ''} GROUP BY 1) x ON x.day = d.day ORDER BY d.day`, base),
+    query(`${daysCte} SELECT d.day, COALESCE(x.n, 0) AS v FROM days d LEFT JOIN (
+             SELECT (created_at AT TIME ZONE $2)::date AS day, count(*) AS n FROM lead_assignments
+              WHERE workspace_id = $1 AND kind = 'escalation' AND created_at >= ${since} ${personal ? 'AND (from_user_id = $4 OR to_user_id = $4)' : ''} GROUP BY 1) x ON x.day = d.day ORDER BY d.day`, base),
+    query(`${daysCte} SELECT d.day, x.v FROM days d LEFT JOIN (
+             SELECT (first_assigned_at AT TIME ZONE $2)::date AS day, avg(extract(epoch FROM (first_acknowledged_at - first_assigned_at))) AS v FROM leads
+              WHERE workspace_id = $1 AND first_acknowledged_at IS NOT NULL AND first_assigned_at >= ${since} ${personal ? 'AND first_acknowledged_by = $4' : ''} GROUP BY 1) x ON x.day = d.day ORDER BY d.day`, base),
+    query(`${daysCte} SELECT d.day, COALESCE(x.cents, 0) AS v FROM days d LEFT JOIN (
+             SELECT (paid_at AT TIME ZONE $2)::date AS day, sum(amount_cents - refunded_cents) AS cents FROM payments
+              WHERE workspace_id = $1 AND currency = $${base.length + 1} AND status IN ('paid','refunded','partially_refunded') AND paid_at >= ${since}
+              ${personal ? 'AND requested_by = $4' : ''} GROUP BY 1) x ON x.day = d.day ORDER BY d.day`, [...base, cur]),
+    query(`SELECT source, count(*) AS n FROM leads WHERE workspace_id = $1 AND created_at >= now() - make_interval(days => $2::int)
+             ${personal ? 'AND owner_id = $3' : ''} GROUP BY source ORDER BY n DESC`, personal ? [ws, n, me] : [ws, n]),
+  ]);
+  const iso = (d) => (d instanceof Date ? d.toISOString().slice(0, 10) : String(d).slice(0, 10));
+  return {
+    scope, days: n, currency: cur,
+    labels: leads.rows.map((r) => iso(r.day)),
+    leads: leads.rows.map((r) => Number(r.v)),
+    escalations: esc.rows.map((r) => Number(r.v)),
+    responseSeconds: resp.rows.map((r) => (r.v === null ? null : Math.round(Number(r.v)))),
+    revenueCents: rev.rows.map((r) => Number(r.v)),
+    sources: sources.rows.map((r) => ({ source: r.source, count: Number(r.n) })),
+  };
+}

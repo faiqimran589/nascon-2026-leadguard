@@ -11,7 +11,7 @@ import { audit } from '../services/audit.js';
 import { addActivity } from '../services/activity.js';
 import { emit } from '../services/events.js';
 import { createLead, acknowledge, reassign, recordLeadAction, getRules, formatSecs } from '../services/leads.js';
-import { dashboard, dashboardScope, RECOVERY_REASONS_SQL, RECOVERY_WHERE, leadScope } from '../services/metrics.js';
+import { dashboard, trends, dashboardScope, RECOVERY_REASONS_SQL, RECOVERY_WHERE, leadScope } from '../services/metrics.js';
 import { loadFields, validateCustom, missingRequired, maskOpp } from '../services/crm.js';
 
 const r = Router();
@@ -193,6 +193,11 @@ r.post('/leads/:id/close', requirePerm('crm.edit'), async (req, res) => {
 });
 
 // ---------- Dashboard (F5) ----------
+r.get('/dashboard/trends', async (req, res) => {
+  const scope = dashboardScope(req.user, req.query.scope !== 'personal');
+  res.json(await trends(req.user, { scope, tz: req.tz, days: parseInt(req.query.days, 10) || 14 }));
+});
+
 r.get('/dashboard', async (req, res) => {
   const scope = dashboardScope(req.user, req.query.scope !== 'personal');
   res.json({ ...(await dashboard(req.user, { scope, tz: req.tz })), canCompany: can(req.user, 'dashboard.company'), timezone: req.tz });

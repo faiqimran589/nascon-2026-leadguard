@@ -5,6 +5,7 @@ import { api, patch, post } from '../lib/api.js';
 import { useApi, useAction, useApp } from '../lib/app.jsx';
 import { AVAIL, ago } from '../lib/format.js';
 import { Toasts } from './ui.jsx';
+import { Wordmark } from './Brand.jsx';
 
 function Nav({ onNavigate }) {
   const { can } = useApp();
@@ -107,7 +108,7 @@ export default function Layout() {
       <a href="#main" className="skip-link">Skip to content</a>
       {open && <div className="scrim" onClick={() => setOpen(false)} aria-hidden />}
       <aside className={`sidebar ${open ? 'open' : ''}`} aria-label="Sidebar">
-        <div className="brand"><span className="brand-mark" aria-hidden>{'✓'}</span>LeadGuard</div>
+        <div className="brand"><Wordmark light /></div>
         <div className="ws-name">{me.workspace.name}</div>
         <Nav onNavigate={() => setOpen(false)} />
       </aside>

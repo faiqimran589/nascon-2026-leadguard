@@ -36,6 +36,12 @@ export function money(amount, currency = 'usd') {
   if (amount === null || amount === undefined) return '—';
   try { return new Intl.NumberFormat('en-US', { style: 'currency', currency: currency.toUpperCase(), maximumFractionDigits: 2 }).format(amount); } catch { return `${amount} ${currency.toUpperCase()}`; }
 }
+// Compact money for headline figures: PKR 25.7M, $12.9K (full value stays in lists and tooltips).
+export function moneyCompact(amount, currency = 'usd') {
+  if (amount === null || amount === undefined) return '\u2014';
+  if (Math.abs(amount) < 10000) return money(amount, currency);
+  try { return new Intl.NumberFormat('en-US', { style: 'currency', currency: currency.toUpperCase(), notation: 'compact', maximumFractionDigits: 1 }).format(amount); } catch { return money(amount, currency); }
+}
 export const cents = (c, currency) => money(Number(c) / (ZERO.has(currency) ? 1 : 100), currency);
 export const fullName = (o) => [o?.first_name, o?.last_name].filter(Boolean).join(' ') || '—';
 

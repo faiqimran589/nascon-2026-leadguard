@@ -3,12 +3,15 @@ import { useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { api, qs } from '../lib/api.js';
 import { useApi, useApp } from '../lib/app.jsx';
-import { cents, duration, fmtDateTime, money, AVAIL } from '../lib/format.js';
+import { cents, duration, fmtDateTime, money, moneyCompact, AVAIL } from '../lib/format.js';
 import { Avail, ErrorNotice, Loading, PageHeader } from '../components/ui.jsx';
+import { TrendChart, BarList, SERIES, compact } from '../components/charts.jsx';
+import { SOURCE } from '../lib/format.js';
 
 const FIGURES = [
   ['new_leads', 'New leads today'], ['response', 'Avg. time to first response'], ['recovery', 'Recovery queue'],
   ['escalations', 'Escalations (24h)'], ['collected', 'Payments received this month'], ['projected', 'Projected revenue'],
+  ['trend_volume', 'Chart: leads & escalations'], ['trend_response', 'Chart: response time'], ['trend_revenue', 'Chart: revenue collected'], ['trend_sources', 'Chart: leads by source'],
   ['pipeline', 'Open pipeline by stage'], ['availability', 'Employee availability'], ['appointments', 'Upcoming appointments'],
 ];
 
@@ -17,6 +20,8 @@ export default function Dashboard() {
   const [scope, setScope] = useState(null);
   const effective = scope || 'company';
   const { data, error, loading, reload } = useApi(`/dashboard${qs({ scope: effective })}`, { live: ['leads', 'crm', 'payments', 'appointments', 'team', 'dashboard'] });
+  const [range, setRange] = useState(14);
+  const { data: tr } = useApi(`/dashboard/trends${qs({ scope: effective, days: range })}`, { live: ['leads', 'payments', 'dashboard'] });
   const nav = useNavigate();
   const [customize, setCustomize] = useState(false);
   const hidden = new Set(me.user.dashboardPrefs?.hidden || []);
@@ -47,6 +52,9 @@ export default function Dashboard() {
             <button className="btn sm" aria-pressed={personal} onClick={() => setScope('personal')}>Just me</button>
           </div>
         )}
+        <div className="dash-toggle" role="group" aria-label="Chart period">
+          {[7, 14, 30].map((d) => <button key={d} className="btn sm" aria-pressed={range === d} onClick={() => setRange(d)}>{d} days</button>)}
+        </div>
         <button className="btn sm" aria-expanded={customize} onClick={() => setCustomize(!customize)}>Customize</button>
       </PageHeader>
       {customize && (
@@ -61,9 +69,30 @@ export default function Dashboard() {
         <Stat k="response" label="Avg. time to first response" value={duration(data.avgFirstResponseSeconds)} hint={`First assignment → first acknowledgement, ${data.responseSample} lead(s), last 30 days`} />
         <Stat k="recovery" label="Recovery queue" value={data.recoveryQueue} alert={data.recoveryQueue > 0} to={`/recovery${personal ? '?scope=personal' : ''}`} hint="Overdue, escalated 2+ times, or idle" />
         <Stat k="escalations" label="Escalations (24h)" value={data.escalations24h} to={`/escalations${personal ? '?scope=personal' : ''}`} hint="Automatic reassignments after a missed window" />
-        <Stat k="collected" label="Payments received this month" value={data.collectedThisMonth.length ? data.collectedThisMonth.map((c) => cents(c.cents, c.currency)).join(' + ') : money(0, data.currency)} to={`/payments?preset=collected_month${sc}`} hint="Confirmed by Stripe webhook, minus refunds" />
-        <Stat k="projected" label="Projected revenue" value={data.valuesMasked ? 'Hidden' : money(data.openPipelineValue, data.currency)} hint={`Open pipeline${data.projectedUnpaid.length ? ` + unpaid requests ${data.projectedUnpaid.map((c) => cents(c.cents, c.currency)).join(' + ')}` : ''}`} to="/opportunities?view=list" />
+        <Stat k="collected" label="Payments received this month" value={data.collectedThisMonth.length ? data.collectedThisMonth.map((c) => moneyCompact(c.cents / 100, c.currency)).join(' + ') : money(0, data.currency)} to={`/payments?preset=collected_month${sc}`} hint="Confirmed by Stripe webhook, minus refunds" />
+        <Stat k="projected" label="Projected revenue" value={data.valuesMasked ? 'Hidden' : moneyCompact(data.openPipelineValue, data.currency)} hint={`Open pipeline ${data.valuesMasked ? '' : money(data.openPipelineValue, data.currency)}${data.projectedUnpaid.length ? ` + unpaid requests ${data.projectedUnpaid.map((c) => cents(c.cents, c.currency)).join(' + ')}` : ''}`} to="/opportunities?view=list" />
       </div>
+      {tr && (
+        <div className="grid grid-2">
+          {show('trend_volume') && (
+            <TrendChart title="Leads & escalations" subtitle={`Per day, last ${tr.days} days`} labels={tr.labels}
+              series={[{ key: 'leads', label: 'New leads', color: SERIES.green, values: tr.leads, area: true }, { key: 'esc', label: 'Escalations', color: SERIES.gold, values: tr.escalations }]} />
+          )}
+          {show('trend_response') && (
+            <TrendChart title="Time to first response" subtitle="Daily average, first assignment → first acknowledgement" labels={tr.labels}
+              series={[{ key: 'resp', label: 'Average', color: SERIES.green, values: tr.responseSeconds }]} fmt={(v) => duration(v)} tickFmt={(v) => (v >= 60 ? `${Math.round(v / 60)}m` : `${Math.round(v)}s`)}
+              empty="No acknowledged leads in this period." />
+          )}
+          {show('trend_revenue') && (
+            <TrendChart title="Revenue collected" subtitle={`Per day in ${tr.currency.toUpperCase()}, confirmed by Stripe, net of refunds`} labels={tr.labels}
+              series={[{ key: 'rev', label: 'Collected', color: SERIES.gold, values: tr.revenueCents.map((c) => c / 100), area: true }]}
+              fmt={(v) => money(v, tr.currency)} empty="No payments collected in this period yet." />
+          )}
+          {show('trend_sources') && (
+            <BarList title="Leads by source" subtitle={`Last ${tr.days} days`} items={tr.sources.map((x) => ({ label: SOURCE[x.source] || x.source, value: x.count }))} fmt={compact} empty="No leads in this period." />
+          )}
+        </div>
+      )}
       <div className="grid grid-3">
         {show('pipeline') && (
           <section className="card span-2" aria-labelledby="pipe-h">
