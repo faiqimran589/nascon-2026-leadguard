@@ -147,3 +147,6 @@ vite.config.ts.timestamp-*
 
 # Turbo Repo
 .turbo
+
+# Keep the example env file in git (it has no real secrets)
+!.env.example
