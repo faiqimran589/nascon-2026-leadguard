@@ -1,10 +1,12 @@
 // Messaging (I1): conversations, outbound sending with retries, inbound capture, delivery status.
+// Providers: Meta WhatsApp Cloud API (used when connected) or Twilio WhatsApp/SMS.
 import { config } from '../config.js';
 import { query, tx } from '../db/pool.js';
 import { HttpError } from '../lib/http.js';
 import { normalizePhone } from '../lib/phone.js';
 import { getIntegration, logEvent } from '../integrations/store.js';
 import * as twilio from '../integrations/twilio.js';
+import * as meta from '../integrations/meta.js';
 import { addActivity } from './activity.js';
 import { emit } from './events.js';
 import { createLead, findOrCreateContact, recordLeadAction } from './leads.js';
@@ -23,11 +25,20 @@ export async function ensureConversation(db, workspaceId, contactId, channel) {
 
 export const statusCallbackUrl = (token) => `${config.appUrl}/webhooks/twilio/${token}/status`;
 
+// Which messaging provider this workspace uses: Meta WhatsApp Cloud API if connected, otherwise Twilio.
+export async function messagingProvider(workspaceId) {
+  const m = await getIntegration({ query }, workspaceId, 'meta');
+  if (m) return { provider: 'meta', integ: m, channel: 'whatsapp', name: 'Meta WhatsApp' };
+  const t = await getIntegration({ query }, workspaceId, 'twilio');
+  if (t) return { provider: 'twilio', integ: t, channel: t.config?.channel || 'whatsapp', name: 'Twilio' };
+  return null;
+}
+
 // Employee sends a message. The row is stored first (so nothing is ever silently lost), then delivered.
 export async function sendMessage({ workspaceId, contactId, body, user }) {
-  const integ = await getIntegration({ query }, workspaceId, 'twilio');
-  if (!integ?.config) throw new HttpError(409, 'Messaging is not connected. An admin can connect Twilio on the Integrations page.');
-  const channel = integ.config.channel || 'whatsapp';
+  const mp = await messagingProvider(workspaceId);
+  if (!mp?.integ?.config) throw new HttpError(409, mp?.integ?.error || 'Messaging is not connected. An admin can connect Meta WhatsApp or Twilio on the Integrations page.');
+  const channel = mp.channel;
   const msg = await tx(async (db) => {
     const { rows: [contact] } = await db.query(
       'SELECT * FROM contacts WHERE id = $1 AND workspace_id = $2 AND deleted_at IS NULL', [contactId, workspaceId]);
@@ -63,25 +74,34 @@ export async function deliver(messageId) {
   });
   if (!claim) return (await query('SELECT * FROM messages WHERE id = $1', [messageId])).rows[0];
 
-  const integ = await getIntegration({ query }, claim.workspace_id, 'twilio');
+  const mp = await messagingProvider(claim.workspace_id);
+  const provider = mp?.provider || 'twilio';
+  const label = mp?.name || 'the messaging provider';
   let update;
   if (claim.opted_out) {
     update = { status: 'failed', error_code: 'opted_out', error_message: 'Contact opted out before the message was sent.' };
-  } else if (!integ?.config) {
-    update = { status: 'failed', error_code: 'not_connected', error_message: integ?.error || 'Messaging integration is not connected.' };
+  } else if (!mp?.integ?.config) {
+    update = { status: 'failed', error_code: 'not_connected', error_message: mp?.integ?.error || 'Messaging integration is not connected.' };
   } else {
-    const r = await twilio.send(integ.config, { to: claim.phone, body: claim.body, statusCallback: statusCallbackUrl(claim.webhook_token) });
+    let r; let sid = null; let providerStatus = 'sent'; let errCode = null; let errText = null;
+    if (provider === 'meta') {
+      r = await meta.send(mp.integ.config, { to: claim.phone, body: claim.body });
+      if (r.ok) { sid = r.json?.messages?.[0]?.id; providerStatus = 'sent'; } else { errCode = r.json?.error?.code; errText = meta.explain(errCode, r.json?.error?.error_data?.details || r.json?.error?.message); }
+    } else {
+      r = await twilio.send(mp.integ.config, { to: claim.phone, body: claim.body, statusCallback: statusCallbackUrl(claim.webhook_token) });
+      if (r.ok) { sid = r.json.sid; providerStatus = r.json.status || 'queued'; } else { errCode = r.json?.code; errText = twilio.explain(r.json?.code, r.json?.message); }
+    }
     if (r.ok) {
-      update = { status: r.json.status || 'queued', provider_sid: r.json.sid, error_code: null, error_message: null, next_attempt_at: null };
-      await logEvent({ query }, { workspaceId: claim.workspace_id, provider: 'twilio', direction: 'outbound', kind: 'message.send', result: 'ok', reference: r.json.sid, httpStatus: r.status });
+      update = { status: providerStatus, provider_sid: sid, error_code: null, error_message: null, next_attempt_at: null };
+      await logEvent({ query }, { workspaceId: claim.workspace_id, provider, direction: 'outbound', kind: 'message.send', result: 'ok', reference: sid, httpStatus: r.status });
     } else if (r.transient && claim.attempts + 1 < MAX_ATTEMPTS) {
       const delay = 10 * 3 ** claim.attempts; // 10s, 30s
-      update = { status: 'queued', error_code: String(r.status || 'network'), error_message: `Temporary problem reaching Twilio (${r.networkError || `HTTP ${r.status}`}). Retrying automatically in ${delay}s (attempt ${claim.attempts + 1} of ${MAX_ATTEMPTS}).`, next_attempt_at: new Date(Date.now() + delay * 1000) };
-      await logEvent({ query }, { workspaceId: claim.workspace_id, provider: 'twilio', direction: 'outbound', kind: 'message.send', result: 'retrying', reference: claim.id, httpStatus: r.status, detail: update.error_message });
+      update = { status: 'queued', error_code: String(r.status || 'network'), error_message: `Temporary problem reaching ${label} (${r.networkError || errText || `HTTP ${r.status}`}). Retrying automatically in ${delay}s (attempt ${claim.attempts + 1} of ${MAX_ATTEMPTS}).`, next_attempt_at: new Date(Date.now() + delay * 1000) };
+      await logEvent({ query }, { workspaceId: claim.workspace_id, provider, direction: 'outbound', kind: 'message.send', result: 'retrying', reference: claim.id, httpStatus: r.status, detail: update.error_message });
     } else {
-      const explained = r.networkError ? `${r.networkError}. Gave up after ${MAX_ATTEMPTS} attempts — use Retry.` : twilio.explain(r.json?.code, r.json?.message) || `HTTP ${r.status}`;
-      update = { status: 'failed', error_code: String(r.json?.code || r.status || 'network'), error_message: explained, next_attempt_at: null };
-      await logEvent({ query }, { workspaceId: claim.workspace_id, provider: 'twilio', direction: 'outbound', kind: 'message.send', result: 'error', reference: claim.id, httpStatus: r.status, detail: explained });
+      const explained = r.networkError ? `${r.networkError}. Gave up after ${MAX_ATTEMPTS} attempts — use Retry.` : errText || `HTTP ${r.status}`;
+      update = { status: 'failed', error_code: String(errCode || r.status || 'network'), error_message: explained, next_attempt_at: null };
+      await logEvent({ query }, { workspaceId: claim.workspace_id, provider, direction: 'outbound', kind: 'message.send', result: 'error', reference: claim.id, httpStatus: r.status, detail: explained });
     }
   }
   const { rows: [m] } = await query(
@@ -111,24 +131,28 @@ export async function processMessageRetries() {
 const STOP_WORDS = ['stop', 'stopall', 'unsubscribe', 'cancel', 'end', 'quit'];
 const START_WORDS = ['start', 'unstop', 'yes'];
 
-// Inbound webhook (already signature-verified). Idempotent on MessageSid.
+// Twilio inbound webhook (already signature-verified).
 export async function handleInbound(workspace, params) {
   const channel = String(params.From || '').startsWith('whatsapp:') ? 'whatsapp' : 'sms';
-  const phone = normalizePhone(params.From);
-  const body = String(params.Body || '').slice(0, 4000) || (Number(params.NumMedia) > 0 ? '[media message — not displayed]' : '');
-  const sid = params.MessageSid || params.SmsSid;
-  if (!phone || !sid) return { result: 'rejected', detail: 'Missing From or MessageSid' };
+  return receiveMessage(workspace, {
+    provider: 'twilio', channel, phone: normalizePhone(params.From), sid: params.MessageSid || params.SmsSid, profileName: params.ProfileName,
+    body: String(params.Body || '').slice(0, 4000) || (Number(params.NumMedia) > 0 ? '[media message — not displayed]' : ''),
+  });
+}
 
+// Provider-independent inbound message handling. Idempotent on the provider message id.
+export async function receiveMessage(workspace, { provider, channel, phone, sid, body, profileName }) {
+  if (!phone || !sid) return { result: 'rejected', detail: 'Missing sender or message id' };
   return tx(async (db) => {
     const ws = workspace.id;
     const dup = await db.query(
-      `INSERT INTO processed_webhooks (workspace_id, provider, event_id) VALUES ($1,'twilio',$2) ON CONFLICT DO NOTHING RETURNING event_id`,
-      [ws, `in:${sid}`]);
+      `INSERT INTO processed_webhooks (workspace_id, provider, event_id) VALUES ($1,$2,$3) ON CONFLICT DO NOTHING RETURNING event_id`,
+      [ws, provider, `in:${sid}`]);
     if (!dup.rows.length) {
-      await logEvent(db, { workspaceId: ws, provider: 'twilio', direction: 'inbound', kind: 'message.received', result: 'duplicate', reference: sid, detail: 'Duplicate delivery ignored' });
+      await logEvent(db, { workspaceId: ws, provider, direction: 'inbound', kind: 'message.received', result: 'duplicate', reference: sid, detail: 'Duplicate delivery ignored' });
       return { result: 'duplicate' };
     }
-    const { contact, created } = await findOrCreateContact(db, ws, { firstName: params.ProfileName || phone, phone, source: channel });
+    const { contact, created } = await findOrCreateContact(db, ws, { firstName: profileName || phone, phone, source: channel });
     const conv = await ensureConversation(db, ws, contact.id, channel);
     await db.query(
       `INSERT INTO messages (workspace_id, conversation_id, direction, body, status, provider_sid) VALUES ($1,$2,'inbound',$3,'received',$4)`,
@@ -154,38 +178,74 @@ export async function handleInbound(workspace, params) {
         await notifyUser(db, { workspaceId: ws, userId: contact.owner_id, title: `New message from ${contact.first_name}`, body: body.slice(0, 120), link: `/inbox/${conv.id}` });
       }
     }
-    await logEvent(db, { workspaceId: ws, provider: 'twilio', direction: 'inbound', kind: 'message.received', result: 'ok', reference: sid, detail: created ? `New contact + lead from ${phone}` : `Attached to existing contact ${contact.first_name}` });
+    await logEvent(db, { workspaceId: ws, provider, direction: 'inbound', kind: 'message.received', result: 'ok', reference: sid, detail: created ? `New contact + lead from ${phone}` : `Attached to existing contact ${contact.first_name}` });
     emit(db, ws, 'messages', { conversationId: conv.id });
     return { result: 'ok', leadId: lead?.id, contactId: contact.id };
   });
 }
 
-// Delivery status callback (already signature-verified). Status never moves backwards.
+// Twilio delivery status callback (already signature-verified).
 export async function handleStatus(workspace, params) {
-  const sid = params.MessageSid || params.SmsSid;
-  const status = String(params.MessageStatus || params.SmsStatus || '').toLowerCase();
-  if (!sid || !status) return { result: 'rejected', detail: 'Missing MessageSid or MessageStatus' };
+  return applyStatus(workspace, {
+    provider: 'twilio', sid: params.MessageSid || params.SmsSid, status: String(params.MessageStatus || params.SmsStatus || '').toLowerCase(),
+    errorCode: params.ErrorCode || null, errorText: params.ErrorCode ? twilio.explain(params.ErrorCode, params.ErrorMessage) : null,
+  });
+}
+
+// Provider-independent delivery status update. Idempotent; status never moves backwards.
+export async function applyStatus(workspace, { provider, sid, status, errorCode, errorText }) {
+  if (!sid || !status) return { result: 'rejected', detail: 'Missing message id or status' };
   return tx(async (db) => {
     const ws = workspace.id;
     const dup = await db.query(
-      `INSERT INTO processed_webhooks (workspace_id, provider, event_id) VALUES ($1,'twilio',$2) ON CONFLICT DO NOTHING RETURNING event_id`,
-      [ws, `st:${sid}:${status}`]);
+      `INSERT INTO processed_webhooks (workspace_id, provider, event_id) VALUES ($1,$2,$3) ON CONFLICT DO NOTHING RETURNING event_id`,
+      [ws, provider, `st:${sid}:${status}`]);
     if (!dup.rows.length) {
-      await logEvent(db, { workspaceId: ws, provider: 'twilio', direction: 'inbound', kind: 'message.status', result: 'duplicate', reference: sid, detail: status });
+      await logEvent(db, { workspaceId: ws, provider, direction: 'inbound', kind: 'message.status', result: 'duplicate', reference: sid, detail: status });
       return { result: 'duplicate' };
     }
     const { rows: [m] } = await db.query('SELECT * FROM messages WHERE workspace_id = $1 AND provider_sid = $2 FOR UPDATE', [ws, sid]);
     if (!m) {
-      await logEvent(db, { workspaceId: ws, provider: 'twilio', direction: 'inbound', kind: 'message.status', result: 'error', reference: sid, detail: `Status "${status}" for unknown message` });
+      await logEvent(db, { workspaceId: ws, provider, direction: 'inbound', kind: 'message.status', result: 'error', reference: sid, detail: `Status "${status}" for unknown message` });
       return { result: 'unknown' };
     }
     if ((STATUS_RANK[status] ?? 0) >= (STATUS_RANK[m.status] ?? 0)) {
-      const errText = params.ErrorCode ? twilio.explain(params.ErrorCode, params.ErrorMessage) : null;
       await db.query('UPDATE messages SET status = $2, error_code = COALESCE($3, error_code), error_message = COALESCE($4, error_message), updated_at = now() WHERE id = $1',
-        [m.id, status, params.ErrorCode || null, errText]);
+        [m.id, status, errorCode ? String(errorCode) : null, errorText]);
     }
-    await logEvent(db, { workspaceId: ws, provider: 'twilio', direction: 'inbound', kind: 'message.status', result: 'ok', reference: sid, detail: status + (params.ErrorCode ? ` (error ${params.ErrorCode})` : '') });
+    await logEvent(db, { workspaceId: ws, provider, direction: 'inbound', kind: 'message.status', result: 'ok', reference: sid, detail: status + (errorCode ? ` (error ${errorCode})` : '') });
     emit(db, ws, 'messages', { conversationId: m.conversation_id });
     return { result: 'ok' };
   });
+}
+
+// Meta WhatsApp Cloud API webhook payload (already signature-verified).
+// One POST can contain several messages and status updates.
+export async function handleMetaWebhook(workspace, payload, cfg) {
+  const results = [];
+  for (const entry of payload?.entry || []) {
+    for (const change of entry.changes || []) {
+      if (change.field !== 'messages') continue;
+      const v = change.value || {};
+      if (cfg.phoneNumberId && v.metadata?.phone_number_id && String(v.metadata.phone_number_id) !== String(cfg.phoneNumberId)) {
+        results.push({ result: 'ignored', detail: `Event for another phone number (${v.metadata.phone_number_id})` });
+        continue;
+      }
+      const names = Object.fromEntries((v.contacts || []).map((c) => [c.wa_id, c.profile?.name]));
+      for (const msg of v.messages || []) {
+        results.push(await receiveMessage(workspace, {
+          provider: 'meta', channel: 'whatsapp', sid: msg.id, phone: normalizePhone(`+${String(msg.from || '').replace(/[^\d]/g, '')}`),
+          profileName: names[msg.from], body: meta.bodyOf(msg).slice(0, 4000),
+        }));
+      }
+      for (const st of v.statuses || []) {
+        const err = st.errors?.[0];
+        results.push(await applyStatus(workspace, {
+          provider: 'meta', sid: st.id, status: String(st.status || '').toLowerCase(),
+          errorCode: err?.code || null, errorText: err ? meta.explain(err.code, err.error_data?.details || err.message || err.title) : null,
+        }));
+      }
+    }
+  }
+  return results;
 }

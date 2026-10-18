@@ -107,7 +107,7 @@ client/src/           main.jsx, styles.css, lib/(api, app context, format), comp
 
 **Integrations**
 
-- `integrations(workspace_id, provider twilio|stripe|google|telegram, config_enc, last_success_at, last_error_at, last_error)`.
+- `integrations(workspace_id, provider twilio|meta|stripe|google|telegram, config_enc, last_success_at, last_error_at, last_error)`.
 - `integration_events(provider, direction inbound|outbound, kind, result ok|error|rejected|duplicate|retrying, reference, http_status, detail)`. Append-only trigger.
 - `processed_webhooks(workspace_id, provider, event_id) PK`.
 - `conversations(contact_id, channel, opportunity_id, unread_count) UNIQUE(workspace, contact, channel)`.
@@ -229,6 +229,17 @@ The Integrations page shows, for each provider:
 - buttons to test, change credentials or disconnect.
 
 Saving runs a live test first (Twilio account fetch, Stripe `/v1/balance`, Telegram `getMe`), and nothing is saved on failure. Live Stripe keys are refused. The Synchronization history tab lists every inbound and outbound event, with filters. The Escalation alerts tab lists alert deliveries, with retry. Outbound calls use a 10s timeout and retry 429/5xx/network errors with a delay. Permanent errors are translated into plain English (for example Twilio 63015 means "phone has not joined the sandbox"). One provider failing never breaks the rest.
+
+### Meta WhatsApp Cloud API (I1 alternative; used instead of Twilio when connected)
+
+- **Configuration:** each workspace saves its `phoneNumberId`, `accessToken`, `appSecret` and an optional `graphVersion` (default v23.0), encrypted. The connection is tested with `GET /{phone-number-id}?fields=display_phone_number,verified_name`.
+- **Webhook URL:** `/webhooks/meta/:token`.
+  - **GET** performs the verification handshake. The `hub.verify_token` must equal `lg_` + the first 24 hex characters of sha256(`meta-verify:` + workspace token); this value is shown on the Integrations page.
+  - **POST** verifies `X-Hub-Signature-256` = `sha256=` + HMAC-SHA256(appSecret, raw body). It then iterates `entry[].changes[]` where `field` is `messages`, and ignores other `phone_number_id`s.
+  - `value.messages[]` go to the shared `receiveMessage()` (de-duplicated by wamid; sender `+` + `from`; profile name taken from `contacts[]`).
+  - `value.statuses[]` go to the shared `applyStatus()` (de-duplicated by `wamid:status`; the status never moves backwards; errors are explained).
+- **Sending:** `POST /{phone-number-id}/messages` with `{messaging_product:'whatsapp', to: digits, type:'text', text:{body}}`, sharing the same store-first, retry and Retry-button logic as Twilio.
+- **Error codes translated:** 190 (token expired), 131030 (number not in the test list), 131047 (outside the 24-hour window), 131026, 131056, 130429, 133010.
 
 ### Twilio (I1)
 

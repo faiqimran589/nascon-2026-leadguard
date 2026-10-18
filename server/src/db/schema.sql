@@ -266,7 +266,7 @@ CREATE INDEX IF NOT EXISTS audit_ws_idx ON audit_log (workspace_id, created_at D
 -- ============ Integrations (I5) ============
 CREATE TABLE IF NOT EXISTS integrations (
   workspace_id    uuid NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
-  provider        text NOT NULL CHECK (provider IN ('twilio','stripe','google','telegram')),
+  provider        text NOT NULL,
   config_enc      text NOT NULL,                  -- AES-256-GCM encrypted JSON (secrets never leave the server)
   public_config   jsonb NOT NULL DEFAULT '{}'::jsonb,  -- non-secret values safe to show (masked hints)
   connected_by    uuid REFERENCES users(id),
@@ -277,6 +277,10 @@ CREATE TABLE IF NOT EXISTS integrations (
   updated_at      timestamptz NOT NULL DEFAULT now(),
   PRIMARY KEY (workspace_id, provider)
 );
+
+-- Allowed providers (re-created on every start so new providers can be added to existing databases)
+ALTER TABLE integrations DROP CONSTRAINT IF EXISTS integrations_provider_check;
+ALTER TABLE integrations ADD CONSTRAINT integrations_provider_check CHECK (provider IN ('twilio','meta','stripe','google','telegram'));
 
 CREATE TABLE IF NOT EXISTS integration_events (
   id           bigserial PRIMARY KEY,

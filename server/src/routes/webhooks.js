@@ -7,8 +7,10 @@ import { Router } from '../lib/http.js';
 import { getIntegration, logEvent } from '../integrations/store.js';
 import * as twilio from '../integrations/twilio.js';
 import * as stripe from '../integrations/stripe.js';
+import * as meta from '../integrations/meta.js';
+import { safeEqual } from '../lib/crypto.js';
 import { audit } from '../services/audit.js';
-import { handleInbound, handleStatus } from '../services/messaging.js';
+import { handleInbound, handleStatus, handleMetaWebhook } from '../services/messaging.js';
 import { applyStripeEvent } from '../services/payments.js';
 
 const r = Router();
@@ -52,6 +54,44 @@ for (const kind of ['inbound', 'status']) {
     }
   });
 }
+
+// ---------- Meta WhatsApp Cloud API ----------
+// GET: one-time verification handshake when you click "Verify and save" in the Meta app dashboard.
+r.get('/meta/:token', async (req, res) => {
+  const ws = await workspaceByToken(req.params.token);
+  if (!ws) return res.status(404).send('Unknown endpoint');
+  const expected = meta.verifyTokenFor(req.params.token);
+  if (req.query['hub.mode'] === 'subscribe' && safeEqual(String(req.query['hub.verify_token'] || ''), expected)) {
+    await logEvent(db0, { workspaceId: ws.id, provider: 'meta', direction: 'inbound', kind: 'webhook.verify', result: 'ok', detail: 'Meta webhook verified' });
+    return res.type('text/plain').send(String(req.query['hub.challenge'] || ''));
+  }
+  await reject(ws, 'meta', 'webhook.verify', 'Verify token does not match', req);
+  return res.status(403).send('Verify token mismatch');
+});
+
+// POST: messages and delivery statuses, signed with X-Hub-Signature-256 (HMAC-SHA256 with the App Secret).
+r.post('/meta/:token', express.raw({ type: '*/*', limit: '1mb' }), async (req, res) => {
+  const ws = await workspaceByToken(req.params.token);
+  if (!ws) return res.status(404).send('Unknown endpoint');
+  const integ = await getIntegration(db0, ws.id, 'meta');
+  if (!integ?.config) { await reject(ws, 'meta', 'webhook', 'Meta WhatsApp is not connected for this workspace', req); return res.status(403).send('Not connected'); }
+  const raw = Buffer.isBuffer(req.body) ? req.body : Buffer.from('');
+  if (!meta.validSignature(integ.config.appSecret, raw, req.get('x-hub-signature-256'))) {
+    await reject(ws, 'meta', 'webhook', 'Invalid X-Hub-Signature-256 (forged/altered request or wrong App Secret)', req);
+    return res.status(403).send('Invalid signature');
+  }
+  let payload;
+  try { payload = JSON.parse(raw.toString('utf8')); } catch { await reject(ws, 'meta', 'webhook', 'Body is not JSON', req); return res.status(400).send('Bad JSON'); }
+  try {
+    const results = await handleMetaWebhook(ws, payload, integ.config);
+    for (const x of results) if (x.result === 'rejected' || x.result === 'ignored') await logEvent(db0, { workspaceId: ws.id, provider: 'meta', direction: 'inbound', kind: 'webhook', result: x.result === 'rejected' ? 'rejected' : 'ok', detail: x.detail });
+    return res.sendStatus(200);
+  } catch (e) {
+    console.error('[meta webhook]', e);
+    await logEvent(db0, { workspaceId: ws.id, provider: 'meta', direction: 'inbound', kind: 'webhook', result: 'error', detail: e.message });
+    return res.status(500).send('Temporary error'); // Meta retries
+  }
+});
 
 // ---------- Stripe (raw JSON body is required for signature verification) ----------
 r.post('/stripe/:token', express.raw({ type: '*/*', limit: '1mb' }), async (req, res) => {

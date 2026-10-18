@@ -64,7 +64,14 @@ async function start() {
   await migrate();
   if (config.isProd) {
     const dist = path.join(root, 'client/dist');
-    if (!fs.existsSync(path.join(dist, 'index.html'))) console.warn('[web] client/dist missing — run "npm run build" first');
+    if (!fs.existsSync(path.join(dist, 'index.html'))) {
+      // Safety net: if the host's build step did not run "npm run build", build the React app now.
+      console.warn('[web] client/dist missing — building the web app now (set the Build Command to "npm install && npm run build" to avoid this)');
+      const { build } = await import('vite');
+      const { default: react } = await import('@vitejs/plugin-react');
+      await build({ configFile: false, root: path.join(root, 'client'), plugins: [react()], logLevel: 'warn', build: { outDir: dist, emptyOutDir: true } });
+      console.log('[web] web app built');
+    }
     app.use(express.static(dist, { index: false, maxAge: '1h' }));
     app.get('*', (_req, res) => res.sendFile(path.join(dist, 'index.html')));
   } else {

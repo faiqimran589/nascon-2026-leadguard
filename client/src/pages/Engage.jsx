@@ -12,12 +12,13 @@ export function Inbox() {
   const nav = useNavigate();
   const { data, error, reload } = useApi('/conversations?pageSize=100', { live: ['messages'] });
   const { data: integ } = useApi('/integrations', { live: ['integrations'] });
-  const tw = integ?.items?.find((x) => x.provider === 'twilio');
+  const msgIntegs = (integ?.items || []).filter((x) => x.provider === 'twilio' || x.provider === 'meta');
+  const noMessaging = integ && msgIntegs.every((x) => x.status === 'not_connected');
   const active = data?.items?.find((c) => c.id === id);
   return (
     <div>
       <PageHeader title="Inbox" subtitle="WhatsApp / SMS conversations. You see conversations of customers you are allowed to see." />
-      {tw && tw.status === 'not_connected' && <div className="notice warn" style={{ marginBottom: 12 }}>Messaging is not connected yet. An admin can connect Twilio on the <Link to="/integrations">Integrations</Link> page.</div>}
+      {noMessaging && <div className="notice warn" style={{ marginBottom: 12 }}>Messaging is not connected yet. An admin can connect WhatsApp (Meta) or Twilio on the <Link to="/integrations">Integrations</Link> page.</div>}
       <ErrorNotice error={error} onRetry={reload} />
       {!data ? <Loading /> : (
         <div className="inbox">

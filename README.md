@@ -2,7 +2,7 @@
 
 LeadGuard is a multi-tenant CRM. It guarantees that **every incoming lead has exactly one accountable owner**, escalates the lead automatically when that owner ignores it, and keeps every action traceable. It connects to real services:
 
-- **Twilio WhatsApp/SMS** for messaging
+- **WhatsApp** for messaging — via **Meta WhatsApp Cloud API** or **Twilio** (WhatsApp/SMS)
 - **Stripe (test mode)** for payments
 - **Google Calendar (OAuth 2.0)** for appointments
 - **Telegram** for escalation alerts
@@ -150,6 +150,17 @@ Each workspace enters **its own** credentials on the **Integrations** page (Owne
 6. Copy the **Incoming message webhook** URL from LeadGuard. In Twilio's **Sandbox settings**, paste it into **"When a message comes in"**, choose **POST**, and save.
 7. **Test it:** send a WhatsApp message from a new phone to the sandbox number. A contact and a lead appear in LeadGuard within seconds.
 
+### WhatsApp via Meta Cloud API (alternative to Twilio)
+LeadGuard supports both providers. When **Meta WhatsApp** is connected it is used for messaging; otherwise Twilio is used.
+> Note: the problem statement (I1) names *Twilio WhatsApp Sandbox* (Twilio SMS accepted). Confirm with the organizers that Meta's Cloud API is acceptable, or keep Twilio connected as well.
+1. https://developers.facebook.com → **My Apps → Create app** → use case/type **Business** (or "Other → Business") → add the **WhatsApp** product. Meta gives you a free **test phone number**.
+2. **WhatsApp → API Setup**: copy the **Phone number ID** (a long number), click **Generate access token** and copy it. Under **To → Manage phone number list**, add your own phone and confirm the code (max 5 test recipients).
+3. **App settings → Basic**: click **Show** next to **App secret** and copy it.
+4. LeadGuard **Integrations → Messaging — WhatsApp (Meta Cloud API) → Connect**: paste Phone number ID, Access token, App Secret → **Test & save**.
+5. Meta **WhatsApp → Configuration → Webhook → Edit**: paste LeadGuard's **Callback URL** and **Verify token** (both shown on the Meta card) → **Verify and save**. Then under **Webhook fields**, **Subscribe** to `messages`.
+6. Test: from your phone send a WhatsApp message to the Meta test number → a contact + lead appear. Reply from **Inbox** (free-form replies only work within 24 h of the customer's last message).
+7. The temporary access token expires after ~24 h. Paste a new one before your demo (or create a permanent System User token in Business Settings).
+
 ### Stripe (test mode payments)
 1. Sign up at https://dashboard.stripe.com/register. No business verification is needed for test mode. Make sure **Test mode** is on.
 2. Go to **Developers → API keys** and copy the **Secret key** (`sk_test_…`). In LeadGuard's **Integrations → Payments → Connect**, paste it and save.
@@ -193,6 +204,8 @@ Each workspace enters **its own** credentials on the **Integrations** page (Owne
 | `Missing environment variable DATABASE_URL` | Your `.env` is missing or in the wrong folder. It must sit next to `package.json`. |
 | `password authentication failed` / `ENOTFOUND` | Copy the Neon connection string again, and remove `&channel_binding=require` from the end. |
 | `EADDRINUSE :3000` | Another program uses port 3000. Set `PORT=3001` in `.env`. |
+| Meta: "The callback URL or verify token couldn't be validated" | The Render site must be awake and the Verify token copied exactly from LeadGuard's Meta card. |
+| Meta: replies fail with error 131030 / 131047 / 190 | 131030: add the number to the test recipient list. 131047: customer must message you first (24-hour window). 190: access token expired, paste a new one. |
 | Twilio messages never arrive | The phone must have joined the sandbox. The webhook URL must be the Render URL, with POST. Check **Integrations → Synchronization history** for `rejected` rows. |
 | "Invalid X-Twilio-Signature" in history | The URL in Twilio must match exactly what LeadGuard shows (https, no extra slash). |
 | Stripe status does not change | Check that the webhook endpoint uses the correct URL, has the events listed above, and that its **signing secret** is saved. Stripe → Webhooks → your endpoint shows the delivery attempts. |

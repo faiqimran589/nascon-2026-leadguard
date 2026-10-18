@@ -9,6 +9,12 @@ import { Badge, Button, ErrorNotice, Field, Loading, PageHeader, Pagination, Tab
 const STATUS = { connected: ['Connected', 'ok'], error: ['Error', 'danger'], not_connected: ['Not connected', 'muted'] };
 
 const FORM = {
+  meta: [
+    { key: 'phoneNumberId', label: 'Phone number ID', help: 'Meta app → WhatsApp → API Setup → “Phone number ID” (a long number, not the phone number itself)' },
+    { key: 'accessToken', label: 'Access token', secret: true, help: 'WhatsApp → API Setup → Generate access token (temporary tokens expire after ~24 h)' },
+    { key: 'appSecret', label: 'App Secret', secret: true, help: 'App settings → Basic → App secret → Show (used to verify webhook signatures)' },
+    { key: 'graphVersion', label: 'Graph API version (optional)', help: 'Leave empty to use v23.0' },
+  ],
   twilio: [
     { key: 'accountSid', label: 'Account SID', help: 'Twilio Console → Account Info (starts with AC)' },
     { key: 'authToken', label: 'Auth Token', secret: true, help: 'Twilio Console → Account Info → Auth Token' },
@@ -29,6 +35,7 @@ const FORM = {
 };
 
 const STEPS = {
+  meta: ['developers.facebook.com → My Apps → Create app → type “Business” → add the WhatsApp product.', 'WhatsApp → API Setup: copy the Phone number ID, click Generate access token, and add your phone under “To → Manage phone number list” (up to 5 test numbers).', 'App settings → Basic: copy the App Secret. Paste all three here and save (we test them with Meta first).', 'WhatsApp → Configuration → Webhook → Edit: paste the Callback URL and Verify token shown below → Verify and save → then Subscribe to the “messages” field.', 'Send a WhatsApp message from your phone to the test number: a contact and lead appear here.'],
   twilio: ['Create a free Twilio account and open Messaging → Try it out → Send a WhatsApp message.', 'From your phone, send the join phrase shown there to the sandbox number.', 'Paste Account SID, Auth Token and the sandbox number here and save (we test the credentials before saving).', 'In the sandbox settings, set “When a message comes in” to the Incoming webhook URL below (HTTP POST).'],
   stripe: ['In the Stripe Dashboard make sure “Test mode” is on.', 'Paste the test Secret key here and save.', 'Developers → Webhooks → Add endpoint: paste the endpoint URL below and select the listed events.', 'Copy the endpoint’s Signing secret (whsec_…) here and save again.'],
   google: ['Google Cloud Console: create a project and enable “Google Calendar API”.', 'Configure the OAuth consent screen (External, Testing) and add each employee’s Gmail as a test user.', 'Create an OAuth client ID of type “Web application” with the redirect URI below.', 'Paste Client ID and secret here. Each employee then connects their own calendar from their Profile.'],
@@ -65,7 +72,7 @@ function ProviderCard({ item, canManage, onSaved }) {
           {Object.keys(item.urls || {}).length > 0 && (
             <div className="stack" style={{ gap: 6 }}>
               {Object.entries(item.urls).map(([label, url]) => (
-                <div key={label}><div className="tiny label-text">{label}</div><div className="row"><span className="mono small" style={{ flex: 1 }}>{url}</span>{url.startsWith('http') && <button className="btn sm" onClick={() => navigator.clipboard?.writeText(url)}>Copy</button>}</div></div>
+                <div key={label}><div className="tiny label-text">{label}</div><div className="row"><span className="mono small" style={{ flex: 1 }}>{url}</span>{!/\s/.test(url) && <button className="btn sm" onClick={() => navigator.clipboard?.writeText(url)}>Copy</button>}</div></div>
               ))}
             </div>
           )}
@@ -105,7 +112,7 @@ function History() {
   return (
     <div>
       <div className="row" style={{ marginBottom: 12 }}>
-        <select aria-label="Provider" style={{ width: 'auto' }} value={p.provider || ''} onChange={(e) => setP({ ...p, provider: e.target.value, page: 1 })}><option value="">All providers</option>{['twilio', 'stripe', 'google', 'telegram'].map((x) => <option key={x}>{x}</option>)}</select>
+        <select aria-label="Provider" style={{ width: 'auto' }} value={p.provider || ''} onChange={(e) => setP({ ...p, provider: e.target.value, page: 1 })}><option value="">All providers</option>{['meta', 'twilio', 'stripe', 'google', 'telegram'].map((x) => <option key={x}>{x}</option>)}</select>
         <select aria-label="Result" style={{ width: 'auto' }} value={p.result || ''} onChange={(e) => setP({ ...p, result: e.target.value, page: 1 })}><option value="">All results</option>{['ok', 'error', 'rejected', 'duplicate', 'retrying'].map((x) => <option key={x}>{x}</option>)}</select>
         <select aria-label="Direction" style={{ width: 'auto' }} value={p.direction || ''} onChange={(e) => setP({ ...p, direction: e.target.value, page: 1 })}><option value="">In & out</option><option value="inbound">Inbound (webhooks)</option><option value="outbound">Outbound (calls)</option></select>
       </div>

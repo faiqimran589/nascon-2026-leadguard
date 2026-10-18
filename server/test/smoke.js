@@ -251,6 +251,46 @@ async function main() {
   ({ rows: [pp] } = await db.query('SELECT status, refunded_cents FROM payments WHERE id = $1', [pay.id]));
   check('partial refund reflected', pp.status === 'partially_refunded' && pp.refunded_cents === 2000, pp);
 
+  console.log('Meta WhatsApp Cloud API webhook: handshake, signature, duplicates, status');
+  const metaCfg = { phoneNumberId: '123456789012345', accessToken: 'EAAtesttoken1234567890', appSecret: 'abcdef0123456789abcdef0123456789' };
+  await db.query("DELETE FROM integrations WHERE workspace_id = $1 AND provider = 'twilio'", [wsA.id]);
+  await db.query("INSERT INTO integrations (workspace_id, provider, config_enc) VALUES ($1,'meta',$2) ON CONFLICT (workspace_id, provider) DO UPDATE SET config_enc = EXCLUDED.config_enc", [wsA.id, encryptJson(metaCfg)]);
+  const { verifyTokenFor } = await import('../src/integrations/meta.js');
+  let mres = await fetch(`${BASE}/webhooks/meta/${wsA.formToken}?hub.mode=subscribe&hub.verify_token=${verifyTokenFor(wsA.formToken)}&hub.challenge=CHALLENGE42`);
+  check('Meta verification handshake echoes challenge', mres.status === 200 && (await mres.text()) === 'CHALLENGE42');
+  mres = await fetch(`${BASE}/webhooks/meta/${wsA.formToken}?hub.mode=subscribe&hub.verify_token=wrong&hub.challenge=x`);
+  check('Meta verification with wrong token rejected', mres.status === 403);
+  const metaPayload = (msgs, statuses) => ({ object: 'whatsapp_business_account', entry: [{ id: 'WABA', changes: [{ field: 'messages', value: {
+    messaging_product: 'whatsapp', metadata: { display_phone_number: '15550001111', phone_number_id: metaCfg.phoneNumberId },
+    contacts: [{ profile: { name: 'Meta Customer' }, wa_id: '923331112222' }], messages: msgs, statuses } }] }] });
+  const metaPost = (payload, secret = metaCfg.appSecret) => {
+    const body = JSON.stringify(payload);
+    const sig = `sha256=${crypto.createHmac('sha256', secret).update(body).digest('hex')}`;
+    return fetch(`${BASE}/webhooks/meta/${wsA.formToken}`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Hub-Signature-256': sig }, body });
+  };
+  const inMsg = { from: '923331112222', id: `wamid.${uniq}IN1`, timestamp: String(Math.floor(Date.now() / 1000)), type: 'text', text: { body: 'Salam, need solar quote' } };
+  mres = await metaPost(metaPayload([inMsg]));
+  check('signed Meta message accepted', mres.status === 200);
+  mres = await metaPost(metaPayload([inMsg]));
+  check('duplicate Meta delivery accepted but ignored', mres.status === 200);
+  const { rows: mm } = await db.query('SELECT * FROM messages WHERE provider_sid = $1', [inMsg.id]);
+  check('only one Meta message stored', mm.length === 1);
+  const { rows: [mc] } = await db.query('SELECT * FROM contacts WHERE workspace_id = $1 AND phone = $2', [wsA.id, '+923331112222']);
+  check('Meta message created contact with name', mc && mc.first_name === 'Meta Customer');
+  const { rows: ml } = await db.query("SELECT * FROM leads WHERE workspace_id = $1 AND contact_id = $2 AND source = 'whatsapp'", [wsA.id, mc?.id]);
+  check('Meta message created exactly one lead', ml.length === 1);
+  mres = await metaPost(metaPayload([{ ...inMsg, id: `wamid.${uniq}FORGED` }]), 'ffffffffffffffffffffffffffffffff');
+  check('forged Meta signature rejected', mres.status === 403);
+  // outbound message row with a provider id, then a delivery status arrives
+  const { rows: [conv] } = await db.query('SELECT id FROM conversations WHERE contact_id = $1', [mc.id]);
+  await db.query("INSERT INTO messages (workspace_id, conversation_id, direction, body, status, provider_sid) VALUES ($1,$2,'outbound','hi','sent',$3)", [wsA.id, conv.id, `wamid.${uniq}OUT1`]);
+  await metaPost(metaPayload(undefined, [{ id: `wamid.${uniq}OUT1`, status: 'delivered', timestamp: '1', recipient_id: '923331112222' }]));
+  await metaPost(metaPayload(undefined, [{ id: `wamid.${uniq}OUT1`, status: 'sent', timestamp: '2', recipient_id: '923331112222' }]));
+  const { rows: [om] } = await db.query('SELECT status FROM messages WHERE provider_sid = $1', [`wamid.${uniq}OUT1`]);
+  check('Meta delivery status stored and never moves backwards', om.status === 'delivered', om);
+  r = await A.get('/api/integrations');
+  check('integrations page lists Meta with callback URL + verify token', r.data.items.some((i) => i.provider === 'meta' && i.status === 'connected' && Object.values(i.urls).some((u) => String(u).includes('/webhooks/meta/'))));
+
   console.log('Audit log');
   r = await A.get('/api/audit?action=lead');
   check('audit has lead events', r.data.items.some((x) => x.action === 'lead.escalated') && r.data.items.some((x) => x.action === 'lead.acknowledged'));

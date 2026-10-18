@@ -2,7 +2,7 @@
 import { encryptJson, decryptJson } from '../lib/crypto.js';
 import { emit } from '../services/events.js';
 
-export const PROVIDERS = ['twilio', 'stripe', 'google', 'telegram'];
+export const PROVIDERS = ['meta', 'twilio', 'stripe', 'google', 'telegram'];
 
 export async function getIntegration(db, workspaceId, provider) {
   const { rows: [row] } = await db.query(

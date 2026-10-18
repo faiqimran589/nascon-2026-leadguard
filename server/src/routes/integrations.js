@@ -11,6 +11,7 @@ import { audit } from '../services/audit.js';
 import { emit } from '../services/events.js';
 import { getIntegration, saveIntegration, logEvent, statusOf, PROVIDERS } from '../integrations/store.js';
 import * as twilio from '../integrations/twilio.js';
+import * as metaWa from '../integrations/meta.js';
 import * as stripe from '../integrations/stripe.js';
 import * as google from '../integrations/google.js';
 import * as telegram from '../integrations/telegram.js';
@@ -19,6 +20,8 @@ const r = Router();
 r.use(requireAuth);
 
 const META = {
+  meta: { name: 'Messaging — WhatsApp (Meta Cloud API)', purpose: 'Talk to customers on WhatsApp and capture leads from incoming messages. When connected, it is used instead of Twilio.', limits: metaWa.LIMITS,
+    can: ['Receive WhatsApp messages and create contacts + leads', 'Reply from the conversation view', 'Show sent / delivered / read / failed status', 'Retry failed messages'] },
   twilio: { name: 'Messaging — Twilio WhatsApp / SMS', purpose: 'Talk to customers and capture leads from incoming messages.', limits: twilio.LIMITS,
     can: ['Receive WhatsApp/SMS messages and create contacts + leads', 'Reply from the conversation view', 'Show sent / delivered / read / failed status', 'Retry failed messages'] },
   stripe: { name: 'Payments — Stripe (test mode)', purpose: 'Collect payments for opportunities.', limits: stripe.LIMITS,
@@ -29,8 +32,8 @@ const META = {
     can: ['Send escalation alerts to each employee’s own Telegram chat', 'Retry failed alerts up to 3 times'] },
 };
 
-const SECRET_FIELDS = { twilio: ['authToken'], stripe: ['secretKey', 'webhookSecret'], google: ['clientSecret'], telegram: ['botToken'] };
-const REQUIRED = { twilio: ['authToken'], stripe: ['secretKey'], google: ['clientSecret'], telegram: ['botToken'] };
+const SECRET_FIELDS = { meta: ['accessToken', 'appSecret'], twilio: ['authToken'], stripe: ['secretKey', 'webhookSecret'], google: ['clientSecret'], telegram: ['botToken'] };
+const REQUIRED = { meta: ['accessToken', 'appSecret'], twilio: ['authToken'], stripe: ['secretKey'], google: ['clientSecret'], telegram: ['botToken'] };
 
 function publicView(provider, cfg) {
   if (!cfg) return {};
@@ -40,6 +43,7 @@ function publicView(provider, cfg) {
 }
 
 function urlsFor(provider, token) {
+  if (provider === 'meta') return { 'Callback URL (Meta app → WhatsApp → Configuration → Webhook)': `${config.appUrl}/webhooks/meta/${token}`, 'Verify token (paste in the same Meta form)': metaWa.verifyTokenFor(token), 'Webhook field to subscribe': 'messages' };
   if (provider === 'twilio') return { 'Incoming message webhook (When a message comes in, HTTP POST)': `${config.appUrl}/webhooks/twilio/${token}/inbound`, 'Status callback (set automatically on each send)': `${config.appUrl}/webhooks/twilio/${token}/status` };
   if (provider === 'stripe') return { 'Webhook endpoint URL': `${config.appUrl}/webhooks/stripe/${token}`, 'Events to send': stripe.WEBHOOK_EVENTS.join(', ') };
   if (provider === 'google') return { 'Authorized redirect URI (Google Cloud → Credentials)': google.redirectUri(), 'Authorized JavaScript origin': config.appUrl };
@@ -66,6 +70,12 @@ r.get('/integrations', async (req, res) => {
 });
 
 const schemas = {
+  meta: z.object({
+    phoneNumberId: z.string().trim().regex(/^\d{6,30}$/, 'Phone number ID is a long number shown on WhatsApp → API Setup'),
+    accessToken: z.string().trim().min(20, 'Paste the full access token').max(1000).optional(),
+    appSecret: z.string().trim().regex(/^[a-f0-9]{32}$/i, 'App Secret is 32 letters/numbers (App settings → Basic → App secret)').optional(),
+    graphVersion: z.string().trim().regex(/^v\d{2}\.\d$/, 'Looks like v23.0').optional().or(z.literal('')),
+  }),
   twilio: z.object({
     accountSid: z.string().trim().regex(/^AC[0-9a-fA-F]{32}$/, 'Account SID starts with AC and has 34 characters'),
     authToken: z.string().trim().min(16).max(64).optional(),
@@ -84,6 +94,7 @@ const schemas = {
 };
 
 async function test(provider, cfg) {
+  if (provider === 'meta') return metaWa.testConnection(cfg);
   if (provider === 'twilio') return twilio.testConnection(cfg);
   if (provider === 'stripe') return stripe.testConnection(cfg);
   if (provider === 'telegram') return telegram.getMe(cfg);
