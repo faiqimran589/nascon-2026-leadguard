@@ -69,8 +69,14 @@ async function start() {
     app.get('*', (_req, res) => res.sendFile(path.join(dist, 'index.html')));
   } else {
     // Development: Vite serves the React app from the same port (hot reload, no CORS).
+    // Config is passed inline (configFile: false) so Vite does not write a temporary bundled config
+    // file, which would make `node --watch` restart the server in an endless loop.
     const { createServer } = await import('vite');
-    const vite = await createServer({ configFile: path.join(root, 'vite.config.js'), server: { middlewareMode: true }, appType: 'spa' });
+    const { default: react } = await import('@vitejs/plugin-react');
+    const vite = await createServer({
+      configFile: false, root: path.join(root, 'client'), plugins: [react()],
+      server: { middlewareMode: true }, appType: 'spa',
+    });
     app.use(vite.middlewares);
   }
   app.use(errorHandler);
